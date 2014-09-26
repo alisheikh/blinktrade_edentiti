@@ -6,6 +6,8 @@ import json
 from urlparse import urlparse
 
 import datetime
+from time import mktime
+
 from pysimplesoap.client import SoapClient
 
 from twisted.internet import reactor, ssl
@@ -14,6 +16,16 @@ from autobahn.twisted.websocket import WebSocketClientProtocol, WebSocketClientF
 
 from pyblinktrade.message_builder import MessageBuilder
 from pyblinktrade.message import JsonMessage
+
+
+def get_verification_data(all_verification_data, key):
+  value = None
+  for data in reversed(all_verification_data):
+    if key in data:
+      value=data[key]
+      break
+  return value
+
 
 class BtcWithdrawalProtocol(WebSocketClientProtocol):
   def onConnect(self, response):
@@ -75,30 +87,79 @@ class BtcWithdrawalProtocol(WebSocketClientProtocol):
       user_id           = msg.get('ClientID')
       username          = msg.get('Username')
       verification_data = msg.get('VerificationData')
+      if verification_data:
+        verification_data = json.loads(verification_data)
 
-      print verification_data
-      # [
-      #   {
-      #     "phone_number": "61111111",
-      #     "name": {"middle": "", "last": "Larcerda", "first": "Carlos"},
-      #     "created_at": 1411608625,
-      #     "uploaded_files": [
-      #       "https://www.jotformpro.com/uploads/pinhopro/42485268120958/287417823131147316/Scanned Image.jpg",
-      #       "https://www.jotformpro.com/uploads/pinhopro/42485268120958/287417823131147316/Scanned-Image.jpg"
-      #     ],
-      #     "submissionID": "287417823131147316",
-      #     "date_of_birth": "2014-JAN-1",
-      #     "identification": {"australian_id": "11111111"},
-      #     "address": {
-      #         "city": "Santos",
-      #         "street1": "Av. Floriano Peixoto, 277",
-      #         "street2": "602",
-      #         "state": "SP",
-      #         "postal_code": "11209",
-      #         "country_code": "Brazil"
-      #     },
-      #     "formID": "42485268120958"}
-      # ]
+      edentiti_status = get_verification_data(verification_data, 'edentiti_status')
+      if edentiti_status == "IN_PROGRESS":
+        return
+
+      street_address = get_verification_data(verification_data, 'address')['street1']
+      flat_number = ''
+      if '/' in street_address:
+        flat_number = street_address[:street_address.find('/') ]
+        street_address = street_address[street_address.find('/')+1: ]
+
+      street_address_parts = street_address.split(" ")
+      street_type = ""
+      if len(street_address_parts) > 1:
+        street_type = street_address_parts[-1]
+        street_address = ' '.join(street_address_parts[:-1])
+
+      street_address_parts = street_address.split(" ")
+      street_number = ""
+      if street_address_parts and street_address_parts[0].isdigit():
+        street_number = street_address_parts[0]
+        street_address = ' '.join(street_address_parts[1:])
+
+      street_name = street_address
+
+      try:
+        res = self.factory.wsdl_client.registerUser(
+            customerId=self.factory.edentiti_customer_id,
+            password=self.factory.edentiti_password,
+            ruleId='default',
+            name={
+              'givenName': get_verification_data(verification_data, 'name')['first'],
+              'middleNames': get_verification_data(verification_data, 'name')['middle'],
+              'surname': get_verification_data(verification_data, 'name')['last']
+            },
+            currentResidentialAddress={
+              'country':get_verification_data(verification_data, 'address')['country_code'],
+              'flatNumber': flat_number,
+              'postcode': get_verification_data(verification_data, 'address')['postal_code'],
+              'propertyName':'',
+              'state':get_verification_data(verification_data, 'address')['state'],
+              'streetName':street_name,
+              'streetNumber': street_number ,
+              'streetType': street_type.upper(),
+              'suburb':get_verification_data(verification_data, 'address')['city']
+            },
+            homePhone=get_verification_data(verification_data, 'phone_number'),
+            dob=datetime.datetime.strptime( get_verification_data(verification_data, 'date_of_birth') ,"%Y-%m-%d"))
+
+        dt = datetime.datetime.now()
+        createdAt = int(mktime(dt.timetuple()) + dt.microsecond/1000000.0)
+        edentiti_verification_data = {
+          "service_provider":"edentiti",
+          "edentiti_status": res['return']['outcome'],
+          "id": res['return']['transactionId'],
+          "user_id": res['return']['userId'],
+          "status": res['return']['outcome'],
+          "created_at": createdAt,
+          "updated_at": createdAt
+        }
+        if res['return']['outcome'] == "IN_PROGRESS":
+          edentiti_verification_data["status"] = "progress"
+          verified = 2
+
+        if edentiti_verification_data["status"] == "valid":
+          verified = 3
+
+        self.sendJSON( MessageBuilder.verifyCustomer(user_id, verified, json.dumps(edentiti_verification_data)))
+
+      except Exception:
+        pass
 
   def onClose(self, wasClean, code, reason):
     print("WebSocket connection closed: {0}".format(reason))
@@ -114,7 +175,6 @@ def main():
   parser.add_argument('-v', "--verbose", action="store_true", default=False, dest="verbose",  help='Verbose')
   parser.add_argument('-t', "--test", action="store_true", default=False, dest="test",  help='Verbose')
 
-
   test_wsdl = 'https://test.edentiti.com/Registrations-Registrations/VerificationServicesPassword?wsdl'
   production_wsdl = 'https://www.edentiti.com/Registrations-Registrations/VerificationServicesPassword?wsdl'
 
@@ -123,102 +183,12 @@ def main():
   wsdl = production_wsdl
   if arguments.test:
     wsdl = test_wsdl
-  #wsdl_client = SoapClient( wsdl=wsdl, soap_ns="soapenv", ns="ns1",  trace=True)
-  wsdl_client = SoapClient( wsdl=wsdl, soap_ns="soapenv", ns="ns1", add_children_ns=False, trace=True)
-
-  verification_data = [
-    {
-       "phone_number": "61111111",
-       "name": {
-         "middle": "",
-         "last": "Larcerda",
-         "first": "Carlos"
-       },
-       "created_at": 1411608625,
-       "uploaded_files": [
-         "https://www.jotformpro.com/uploads/pinhopro/42485268120958/287417823131147316/Scanned Image.jpg",
-         "https://www.jotformpro.com/uploads/pinhopro/42485268120958/287417823131147316/Scanned-Image.jpg"
-       ],
-       "submissionID": "287417823131147316",
-       "date_of_birth": "2014-JAN-1",
-       "identification": {"australian_id": "11111111"},
-       "address": {
-         "city": "Santos",
-         "street1": "Av. Floriano Peixoto, 277",
-         "street2": "602",
-         "state": "SP",
-         "postal_code": "11209",
-         "country_code": "Brazil"
-       },
-       "formID": "42485268120958"
-    }
-  ]
-
-  def get_verification_data(all_verification_data, key):
-    value = None
-    for data in reversed(all_verification_data):
-      if key in data:
-        value=data[key]
-        break
-    return value
-
-
-  #a = wsdl_client.isUserIdRegistered( arguments.edentiti_customer_id, arguments.edentiti_password, 'g2rUPcc8'  )
-  # <ns1:registerUser>
-  #   <name>
-  #     <givenName xmlns="http://services.registrations.edentiti.com/">JoAnn</givenName>
-  #     <middleNames xmlns="http://services.registrations.edentiti.com/"></middleNames>
-  #     <surname xmlns="http://services.registrations.edentiti.com/">Faryma</surname>
-  #   </name>
-  #   <email>email@gmail.com</email>
-  #   <currentResidentialAddress>
-  #     <country xmlns="http://services.registrations.edentiti.com/">US</country>
-  #     <flatNumber xmlns="http://services.registrations.edentiti.com/">3G</flatNumber>
-  #     <postcode xmlns="http://services.registrations.edentiti.com/">11209</postcode>
-  #     <propertyName xmlns="http://services.registrations.edentiti.com/"></propertyName>
-  #     <state xmlns="http://services.registrations.edentiti.com/">NY</state>
-  #     <streetName xmlns="http://services.registrations.edentiti.com/">RIDGE BLVD</streetName>
-  #     <streetNumber xmlns="http://services.registrations.edentiti.com/">7501</streetNumber>
-  #     <streetType xmlns="http://services.registrations.edentiti.com/">st</streetType>
-  #   <suburb xmlns="http://services.registrations.edentiti.com/"></suburb>
-  #   </currentResidentialAddress><dob>2014-09-25T13:13:54.907593</dob>
-  #   <homePhone>0262541234</homePhone>
-  # </ns1:registerUser>
-
-
-  a = wsdl_client.registerUser( customerId=arguments.edentiti_customer_id,
-                            password=arguments.edentiti_password,
-                            ruleId='default',
-                            name={
-                              'givenName': get_verification_data(verification_data, 'name')['first'],
-                              'middleNames': get_verification_data(verification_data, 'name')['middle'],
-                              'surname': get_verification_data(verification_data, 'name')['last']
-                              },
-                            currentResidentialAddress={
-                              'country':get_verification_data(verification_data, 'address')['country_code'],
-                              'flatNumber': get_verification_data(verification_data, 'address')['street2'],
-                              'postcode': get_verification_data(verification_data, 'address')['postal_code'],
-                              'propertyName':'',
-                              'state':get_verification_data(verification_data, 'address')['state'],
-                              'streetName':get_verification_data(verification_data, 'address')['street1'],
-                              'streetNumber':'7501',
-                              'streetType':'AVENUE',
-                              'suburb':get_verification_data(verification_data, 'address')['city']
-                            },
-                            homePhone=get_verification_data(verification_data, 'phone_number'),
-                            dob=datetime.datetime.today())
-
-  print a
-
-
-
-
-  return
+  wsdl_client = SoapClient( wsdl=wsdl, soap_ns="soapenv", ns="ns1", trace=True)
 
   blinktrade_port = 443
   should_connect_on_ssl = True
   blinktrade_url = urlparse(arguments.blintrade_webscoket_url)
-  if  blinktrade_url.port is None and blinktrade_url.scheme == 'ws':
+  if blinktrade_url.port is None and blinktrade_url.scheme == 'ws':
     should_connect_on_ssl = False
     blinktrade_port = 80
 

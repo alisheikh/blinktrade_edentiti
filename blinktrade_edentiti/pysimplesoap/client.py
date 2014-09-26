@@ -80,7 +80,7 @@ class SoapClient(object):
                  sessions=False, soap_server=None, timeout=TIMEOUT,
                  http_headers=None, trace=False,
                  username=None, password=None,
-                 key_file=None, plugins=None, add_children_ns=True
+                 key_file=None, plugins=None
                  ):
         """
         :param http_headers: Additional HTTP Headers; example: {'Host': 'ipsec.example.com'}
@@ -147,7 +147,6 @@ class SoapClient(object):
 
 
         # namespace prefix, None to use xmlns attribute or False to not use it:
-        self.__add_children_ns = add_children_ns
         self.__ns = ns
         if not ns:
             self.__xml = """<?xml version="1.0" encoding="UTF-8"?>
@@ -246,7 +245,7 @@ class SoapClient(object):
                     # in dict key names
                     header.import_node(v)
                 else:
-                    header.marshall(k, v, ns=self.__ns, add_children_ns=self.__add_children_ns)
+                    header.marshall(k, v, ns=self.__ns, add_children_ns=False)
         if request_headers:
             header = request('Header', ns=list(soap_namespaces.values()),)
             for subheader in request_headers.children():
